@@ -1,13 +1,21 @@
 package com.example.vision
 
 import android.graphics.PointF
+import android.graphics.Rect
 import android.graphics.RectF
+import androidx.annotation.OptIn
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageProxy
 import com.example.data.model.GestureSignature
 import com.example.data.model.GestureType
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.Face
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetectorOptions
+import java.util.concurrent.TimeUnit
 import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -25,22 +33,35 @@ data class DetectionResult(
     val fps: Float = 0f,
     val signature: GestureSignature? = null,
     val matchScore: Float = 0f,
-    val isTrainedMatch: Boolean = false
+    val isTrainedMatch: Boolean = false,
+    val faceDetected: Boolean = false,
+    val faceBoundingBox: RectF? = null
 )
 
 class GestureDetectorEngine(
-    var sensitivityThreshold: Float = 0.65f, // 0.5 (sensitive) to 0.85 (strict)
-    var matchThreshold: Float = 0.82f,      // Required match score to trained template
-    var requireTrainedOnly: Boolean = false  // Only trigger if matched with user-trained sample
+    var sensitivityThreshold: Float = 0.65f,
+    var matchThreshold: Float = 0.82f,
+    var requireTrainedOnly: Boolean = false
 ) {
-    // User trained profiles: GestureId -> List of sample signatures
     var trainedProfiles: Map<String, List<GestureSignature>> = emptyMap()
+
+    // Fast on-device ML Kit Face Detector for guaranteed face exclusion
+    private val faceDetector by lazy {
+        val options = FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+            .setMinFaceSize(0.15f)
+            .build()
+        FaceDetection.getClient(options)
+    }
 
     private val motionHistory = mutableListOf<Pair<Long, PointF>>()
     private var frameCount = 0
     private var currentFps = 0f
     private var fpsTimer = 0L
 
+    @OptIn(ExperimentalGetImage::class)
     fun analyze(image: ImageProxy): DetectionResult {
         val startTime = System.currentTimeMillis()
 
@@ -55,6 +76,74 @@ class GestureDetectorEngine(
             val planes = image.planes
             if (planes.size < 3) return emptyResult(startTime)
 
+            val imgW = image.width
+            val imgH = image.height
+
+            // 1. Detect any faces using ML Kit with strict timeout
+            var detectedFaces: List<Face> = emptyList()
+            val mediaImage = image.image
+            if (mediaImage != null) {
+                try {
+                    val inputImage = InputImage.fromMediaImage(mediaImage, image.imageInfo.rotationDegrees)
+                    val task = faceDetector.process(inputImage)
+                    detectedFaces = Tasks.await(task, 75, TimeUnit.MILLISECONDS) ?: emptyList()
+                } catch (_: Exception) {
+                    // Fall back to geometric exclusion if ML Kit times out
+                }
+            }
+
+            // Downsample grid for ultra-low latency (<10ms)
+            val gridW = 80
+            val gridH = 60
+            val stepX = imgW / gridW
+            val stepY = imgH / gridH
+
+            // 2. Build Face Exclusion Mask (expand face box by 25% for chin/ears/neck)
+            val faceMask = BooleanArray(gridW * gridH)
+            var primaryFaceBoxNorm: RectF? = null
+
+            for (face in detectedFaces) {
+                val box = face.boundingBox
+                // CameraX rotation might mirror / rotate coordinates
+                val rotation = image.imageInfo.rotationDegrees
+                val (fLeft, fTop, fRight, fBottom) = if (rotation == 90 || rotation == 270) {
+                    // Coordinates relative to rotated dimensions
+                    val normL = (box.left.toFloat() / imgH).coerceIn(0f, 1f)
+                    val normR = (box.right.toFloat() / imgH).coerceIn(0f, 1f)
+                    val normT = (box.top.toFloat() / imgW).coerceIn(0f, 1f)
+                    val normB = (box.bottom.toFloat() / imgW).coerceIn(0f, 1f)
+                    listOf(normL, normT, normR, normB)
+                } else {
+                    val normL = (box.left.toFloat() / imgW).coerceIn(0f, 1f)
+                    val normR = (box.right.toFloat() / imgW).coerceIn(0f, 1f)
+                    val normT = (box.top.toFloat() / imgH).coerceIn(0f, 1f)
+                    val normB = (box.bottom.toFloat() / imgH).coerceIn(0f, 1f)
+                    listOf(normL, normT, normR, normB)
+                }
+
+                // Expand by 25% to cover chin, neck, and hair
+                val expX = (fRight - fLeft) * 0.25f
+                val expY = (fBottom - fTop) * 0.30f
+                val eLeft = (fLeft - expX).coerceAtLeast(0f)
+                val eRight = (fRight + expX).coerceAtMost(1f)
+                val eTop = (fTop - expY).coerceAtLeast(0f)
+                val eBottom = (fBottom + expY * 1.4f).coerceAtMost(1f) // neck extends down
+
+                primaryFaceBoxNorm = RectF(eLeft, eTop, eRight, eBottom)
+
+                val gxMin = (eLeft * gridW).toInt().coerceIn(0, gridW - 1)
+                val gxMax = (eRight * gridW).toInt().coerceIn(0, gridW - 1)
+                val gyMin = (eTop * gridH).toInt().coerceIn(0, gridH - 1)
+                val gyMax = (eBottom * gridH).toInt().coerceIn(0, gridH - 1)
+
+                for (gy in gyMin..gyMax) {
+                    for (gx in gxMin..gxMax) {
+                        faceMask[gy * gridW + gx] = true
+                    }
+                }
+            }
+
+            // 3. Extract skin pixels while strictly masking out any face region
             val yBuffer = planes[0].buffer
             val uBuffer = planes[1].buffer
             val vBuffer = planes[2].buffer
@@ -62,15 +151,6 @@ class GestureDetectorEngine(
             val yRowStride = planes[0].rowStride
             val uvRowStride = planes[1].rowStride
             val uvPixelStride = planes[1].pixelStride
-
-            val imgW = image.width
-            val imgH = image.height
-
-            // Downsample grid for low-latency (<8ms)
-            val gridW = 80
-            val gridH = 60
-            val stepX = imgW / gridW
-            val stepY = imgH / gridH
 
             val skinGrid = BooleanArray(gridW * gridH)
             var skinPixelCount = 0
@@ -81,11 +161,13 @@ class GestureDetectorEngine(
             var minY = gridH
             var maxY = 0
 
-            // Ambient skin chrominance cluster: Cb in [77..128], Cr in [133..173], Y in [50..240]
             for (gy in 0 until gridH) {
                 val py = (gy * stepY).coerceAtMost(imgH - 1)
                 val uvY = py / 2
                 for (gx in 0 until gridW) {
+                    // IF this pixel is inside the face mask, skip completely!
+                    if (faceMask[gy * gridW + gx]) continue
+
                     val px = (gx * stepX).coerceAtMost(imgW - 1)
                     val uvX = px / 2
 
@@ -97,6 +179,7 @@ class GestureDetectorEngine(
                         val u = uBuffer.get(uvIdx).toInt() and 0xFF
                         val v = vBuffer.get(uvIdx).toInt() and 0xFF
 
+                        // Human skin chrominance cluster: Cb in [78..128], Cr in [134..173], Y in [50..240]
                         val isSkin = (y in 50..240) && (u in 78..128) && (v in 134..173)
 
                         if (isSkin) {
@@ -113,13 +196,12 @@ class GestureDetectorEngine(
                 }
             }
 
-            // Minimum hand size check (at least 3.5% and at most 60% of frame)
-            val totalPixels = gridW * gridH
-            val minSkinThreshold = (totalPixels * 0.035f).toInt()
-            val maxSkinThreshold = (totalPixels * 0.65f).toInt()
+            // Minimum skin area check
+            val minSkinThreshold = (gridW * gridH * 0.025f).toInt()
+            val maxSkinThreshold = (gridW * gridH * 0.60f).toInt()
 
             if (skinPixelCount < minSkinThreshold || skinPixelCount > maxSkinThreshold || minX >= maxX || minY >= maxY) {
-                return emptyResult(startTime)
+                return emptyResult(startTime, detectedFaces.isNotEmpty(), primaryFaceBoxNorm)
             }
 
             val boxWidth = maxX - minX + 1
@@ -128,22 +210,25 @@ class GestureDetectorEngine(
             val solidity = skinPixelCount.toFloat() / boxArea.coerceAtLeast(1)
             val aspectRatio = boxHeight.toFloat() / boxWidth.coerceAtLeast(1)
 
-            // Strict False-Positive / Face Filter:
-            // A human face directly facing the camera has high solidity (0.85+), no finger valleys, and is positioned near center-top without wrist edge
-            val isNearTopCenter = minY < gridH * 0.15f && (minX + maxX) / 2 in (gridW * 0.25f).toInt()..(gridW * 0.75f).toInt()
-            if (solidity > 0.88f && isNearTopCenter && aspectRatio in 0.85f..1.35f) {
-                // Reject probable face in top center
-                return emptyResult(startTime)
+            // Geometric Face Fallback Check (if ML Kit did not run or was obstructed):
+            // Oval shape in top 40% of screen without wrist stem
+            val isTopHalf = minY < gridH * 0.25f && maxY < gridH * 0.65f
+            if (isTopHalf && solidity > 0.85f && aspectRatio in 0.9f..1.4f && detectedFaces.isEmpty()) {
+                // Secondary check: does it enter from bottom?
+                val touchesBottom = maxY >= gridH - 3
+                if (!touchesBottom) {
+                    return emptyResult(startTime, true, primaryFaceBoxNorm)
+                }
             }
 
             val centroidX = (sumX.toFloat() / skinPixelCount) / gridW
             val centroidY = (sumY.toFloat() / skinPixelCount) / gridH
             val currentCentroid = PointF(centroidX, centroidY)
 
-            // Process optical motion for swipe
+            // Track Motion for Swipes
             val detectedSwipe = processMotion(startTime, currentCentroid)
 
-            // Compute Palm Center via Maximum Inscribed Circle
+            // Approximate Palm Center via Maximum Inscribed Circle
             var bestCenterX = minX + boxWidth / 2
             var bestCenterY = minY + boxHeight / 2
             var bestRadius = 0f
@@ -204,6 +289,17 @@ class GestureDetectorEngine(
                 normalizedRadialDistances[i] = (maxDist / bestRadius).coerceIn(0f, 4f)
             }
 
+            // ANATOMICAL REQUIREMENT: Radial Peak-to-Valley Concavity Check
+            // A human hand with extended fingers ALWAYS has deep concavities (inter-digital valleys).
+            // A round blob (like an undetected face, neck, or shirt) has min/max radial ratio > 0.70.
+            var minRadial = Float.MAX_VALUE
+            var maxRadial = 0f
+            for (d in radialDistances) {
+                if (d > maxRadial) maxRadial = d
+                if (d > 0 && d < minRadial) minRadial = d
+            }
+            val peakToValleyRatio = if (maxRadial > 0f) minRadial / maxRadial else 1.0f
+
             // Fingertip peak detection
             val fingerThresholdRatio = 1.32f
             val minFingerDist = bestRadius * fingerThresholdRatio
@@ -235,6 +331,12 @@ class GestureDetectorEngine(
             }
 
             val fingerCount = detectedFingertips.size
+
+            // If the blob has no fingers AND peakToValleyRatio > 0.65, but is large (> 20% area), it is NOT a fist, it is an ambient blob!
+            if (fingerCount == 0 && peakToValleyRatio > 0.65f && boxArea > gridW * gridH * 0.15f) {
+                return emptyResult(startTime, detectedFaces.isNotEmpty(), primaryFaceBoxNorm)
+            }
+
             val normPalmCenter = PointF(bestCenterX.toFloat() / gridW, bestCenterY.toFloat() / gridH)
             val normPalmRadius = bestRadius / gridW
             val normBoundingBox = RectF(
@@ -264,7 +366,6 @@ class GestureDetectorEngine(
                 finalGesture = detectedSwipe
                 finalConfidence = 0.92f
             } else if (trainedProfiles.isNotEmpty()) {
-                // Match against user-trained profiles!
                 var bestGestureName: String? = null
                 var highestSim = 0f
 
@@ -280,7 +381,6 @@ class GestureDetectorEngine(
 
                 bestMatchScore = highestSim
 
-                // Check against calibrated threshold
                 if (highestSim >= matchThreshold && bestGestureName != null) {
                     try {
                         finalGesture = GestureType.valueOf(bestGestureName)
@@ -289,7 +389,6 @@ class GestureDetectorEngine(
                     } catch (_: Exception) {
                     }
                 } else if (!requireTrainedOnly) {
-                    // Fallback to strict heuristic
                     val (hGesture, hConf) = classifyStaticStrict(
                         fingerCount = fingerCount,
                         palmCenter = normPalmCenter,
@@ -302,7 +401,6 @@ class GestureDetectorEngine(
                     finalConfidence = hConf
                 }
             } else if (!requireTrainedOnly) {
-                // No user profiles trained yet: use strict heuristic
                 val (hGesture, hConf) = classifyStaticStrict(
                     fingerCount = fingerCount,
                     palmCenter = normPalmCenter,
@@ -330,7 +428,9 @@ class GestureDetectorEngine(
                 fps = currentFps,
                 signature = currentSignature,
                 matchScore = bestMatchScore,
-                isTrainedMatch = isTrainedMatch
+                isTrainedMatch = isTrainedMatch,
+                faceDetected = detectedFaces.isNotEmpty(),
+                faceBoundingBox = primaryFaceBoxNorm
             )
         } catch (_: Exception) {
             return emptyResult(startTime)
@@ -345,24 +445,17 @@ class GestureDetectorEngine(
         box: RectF,
         solidity: Float
     ): Pair<GestureType?, Float> {
-        // Strict classification requiring solid hand structure
         return when {
-            // Open Palm requires 4-5 fingers and broad bounding box
-            fingerCount in 4..5 && box.width() > 0.20f && box.height() > 0.20f -> {
+            fingerCount in 4..5 && box.width() > 0.18f && box.height() > 0.18f -> {
                 GestureType.OPEN_PALM to 0.88f
             }
-
-            // Fist requires 0 fingers and compact aspect ratio
-            fingerCount == 0 && box.width() > 0.12f && box.height() > 0.12f && solidity > 0.65f -> {
+            fingerCount == 0 && box.width() in 0.10f..0.28f && box.height() in 0.10f..0.28f && solidity > 0.68f -> {
                 GestureType.FIST to 0.85f
             }
-
-            // 1 finger
             fingerCount == 1 -> {
                 val tip = fingertips.first()
                 val dy = tip.y - palmCenter.y
                 val dx = tip.x - palmCenter.x
-
                 when {
                     dy < -0.16f && abs(dx) < 0.10f -> GestureType.POINTING_UP to 0.88f
                     dy < -0.14f && abs(dx) >= 0.10f -> GestureType.THUMBS_UP to 0.85f
@@ -372,8 +465,6 @@ class GestureDetectorEngine(
                     else -> null to 0f
                 }
             }
-
-            // 2 fingers (Victory or Rock On)
             fingerCount == 2 -> {
                 val f1 = fingertips[0]
                 val f2 = fingertips[1]
@@ -383,13 +474,10 @@ class GestureDetectorEngine(
                     else GestureType.VICTORY to 0.89f
                 } else null to 0f
             }
-
-            // 3 fingers (OK sign)
             fingerCount == 3 -> {
                 val topFingers = fingertips.count { it.y < palmCenter.y }
                 if (topFingers >= 2) GestureType.OK_SIGN to 0.82f else null to 0f
             }
-
             else -> null to 0f
         }
     }
@@ -424,13 +512,19 @@ class GestureDetectorEngine(
         }
     }
 
-    private fun emptyResult(startTime: Long): DetectionResult {
+    private fun emptyResult(
+        startTime: Long,
+        faceDetected: Boolean = false,
+        faceBox: RectF? = null
+    ): DetectionResult {
         return DetectionResult(
             gesture = null,
             confidence = 0f,
             latencyMs = (System.currentTimeMillis() - startTime).coerceAtLeast(1L),
             handDetected = false,
-            fps = currentFps
+            fps = currentFps,
+            faceDetected = faceDetected,
+            faceBoundingBox = faceBox
         )
     }
 }
