@@ -9,6 +9,8 @@ import com.example.action.ActionExecutor
 import com.example.data.model.ActionType
 import com.example.data.model.GestureLog
 import com.example.data.model.GestureMapping
+import com.example.data.model.GestureSignature
+import com.example.data.model.GestureTrainingSample
 import com.example.data.model.GestureType
 import com.example.data.repository.GestureRepository
 import com.example.service.GestureRecognitionService
@@ -41,6 +43,12 @@ class GestureViewModel(
     val averageLatency: StateFlow<Double?> = repository.averageLatency
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    val trainedGestureIds: StateFlow<List<String>> = repository.trainedGestureIds
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val allTrainingSamples: StateFlow<List<GestureTrainingSample>> = repository.allTrainingSamples
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val isServiceRunning: StateFlow<Boolean> = GestureRecognitionService.isRunning
     val isServicePaused: StateFlow<Boolean> = GestureRecognitionService.isServicePaused
     val serviceLiveDetection: StateFlow<DetectionResult?> = GestureRecognitionService.liveDetection
@@ -58,13 +66,19 @@ class GestureViewModel(
     private val _sensitivity = MutableStateFlow(0.65f)
     val sensitivity: StateFlow<Float> = _sensitivity.asStateFlow()
 
+    private val _matchThreshold = MutableStateFlow(0.82f)
+    val matchThreshold: StateFlow<Float> = _matchThreshold.asStateFlow()
+
+    private val _requireTrainedOnly = MutableStateFlow(false)
+    val requireTrainedOnly: StateFlow<Boolean> = _requireTrainedOnly.asStateFlow()
+
     private val _soundFeedback = MutableStateFlow(true)
     val soundFeedback: StateFlow<Boolean> = _soundFeedback.asStateFlow()
 
     private val _hapticFeedback = MutableStateFlow(true)
     val hapticFeedback: StateFlow<Boolean> = _hapticFeedback.asStateFlow()
 
-    private val inAppDetector = GestureDetectorEngine(_sensitivity.value)
+    private val inAppDetector = GestureDetectorEngine(_sensitivity.value, _matchThreshold.value, _requireTrainedOnly.value)
     private var candidateGesture: GestureType? = null
     private var candidateStartTime = 0L
     private var lastActionTime = 0L
@@ -89,6 +103,18 @@ class GestureViewModel(
     init {
         viewModelScope.launch {
             repository.ensureDefaultMappings()
+        }
+
+        // Keep inAppDetector synchronized with user training profiles
+        viewModelScope.launch {
+            repository.allTrainingSamples.collect {
+                val profiles = repository.loadTrainedProfiles()
+                inAppDetector.trainedProfiles = profiles
+                if (profiles.isNotEmpty()) {
+                    _requireTrainedOnly.value = true
+                    inAppDetector.requireTrainedOnly = true
+                }
+            }
         }
     }
 
@@ -134,12 +160,53 @@ class GestureViewModel(
         inAppDetector.sensitivityThreshold = value
     }
 
+    fun setMatchThreshold(value: Float) {
+        _matchThreshold.value = value
+        inAppDetector.matchThreshold = value
+    }
+
+    fun setRequireTrainedOnly(enabled: Boolean) {
+        _requireTrainedOnly.value = enabled
+        inAppDetector.requireTrainedOnly = enabled
+    }
+
     fun setSoundFeedback(enabled: Boolean) {
         _soundFeedback.value = enabled
     }
 
     fun setHapticFeedback(enabled: Boolean) {
         _hapticFeedback.value = enabled
+    }
+
+    fun saveTrainingSample(gesture: GestureType, sampleIndex: Int, signature: GestureSignature) {
+        viewModelScope.launch {
+            repository.saveTrainingSample(gesture.name, sampleIndex, signature)
+            val updated = repository.loadTrainedProfiles()
+            inAppDetector.trainedProfiles = updated
+            inAppDetector.requireTrainedOnly = true
+            _requireTrainedOnly.value = true
+        }
+    }
+
+    fun deleteTrainingForGesture(gestureId: String) {
+        viewModelScope.launch {
+            repository.deleteTrainingForGesture(gestureId)
+            val updated = repository.loadTrainedProfiles()
+            inAppDetector.trainedProfiles = updated
+            if (updated.isEmpty()) {
+                _requireTrainedOnly.value = false
+                inAppDetector.requireTrainedOnly = false
+            }
+        }
+    }
+
+    fun clearAllTraining() {
+        viewModelScope.launch {
+            repository.clearAllTraining()
+            inAppDetector.trainedProfiles = emptyMap()
+            _requireTrainedOnly.value = false
+            inAppDetector.requireTrainedOnly = false
+        }
     }
 
     fun processInAppFrame(image: ImageProxy, context: Context) {
@@ -168,12 +235,13 @@ class GestureViewModel(
                                     }
 
                                     val msg = ActionExecutor.execute(context, mapping)
-                                    _inAppLastTriggered.value = "${gesture.title} → $msg"
+                                    val tag = if (result.isTrainedMatch) " (Trained Match ${(result.matchScore * 100).toInt()}%)" else ""
+                                    _inAppLastTriggered.value = "${gesture.title} → $msg$tag"
 
                                     repository.logExecution(
                                         gesture = gesture,
                                         action = mapping.action,
-                                        actionLabel = msg,
+                                        actionLabel = msg + tag,
                                         latencyMs = result.latencyMs,
                                         confidence = result.confidence
                                     )

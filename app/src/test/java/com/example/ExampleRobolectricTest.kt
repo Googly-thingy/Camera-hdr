@@ -31,4 +31,27 @@ class ExampleRobolectricTest {
     assertNotNull(actions.find { it == ActionType.MEDIA_PLAY_PAUSE })
     assertNotNull(actions.find { it == ActionType.LAUNCH_APP })
   }
+
+  @Test
+  fun `verify gesture signature matching produces high score for identical profiles`() {
+    val rads = FloatArray(36) { 1.5f }
+    val sig1 = com.example.data.model.GestureSignature(
+      radialDistances = rads,
+      fingerCount = 5,
+      aspectRatio = 1.2f,
+      solidity = 0.6f,
+      palmRadiusRatio = 0.3f,
+      peakAngles = listOf(0.5, 1.2, 1.8, 2.4, 3.0)
+    )
+    val sig2 = com.example.data.model.GestureSignature(
+      radialDistances = rads.copyOf(),
+      fingerCount = 5,
+      aspectRatio = 1.2f,
+      solidity = 0.6f,
+      palmRadiusRatio = 0.3f,
+      peakAngles = listOf(0.5, 1.2, 1.8, 2.4, 3.0)
+    )
+    val score = sig1.similarityWith(sig2)
+    assertEquals(1.0f, score, 0.01f)
+  }
 }

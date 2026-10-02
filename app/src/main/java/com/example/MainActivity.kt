@@ -58,12 +58,16 @@ import com.example.ui.theme.GestureFlowTheme
 import com.example.ui.viewmodel.GestureViewModel
 import com.example.ui.viewmodel.GestureViewModelFactory
 
+import androidx.compose.material.icons.filled.ModelTraining
+import com.example.ui.screens.TrainingScreen
+
 enum class AppTab(
     val title: String,
     val icon: ImageVector,
     val testTag: String
 ) {
     SCANNER("Scanner", Icons.Default.CameraAlt, "tab_scanner"),
+    TRAIN("Train", Icons.Default.ModelTraining, "tab_train"),
     ACTIONS("Actions", Icons.Default.Tune, "tab_actions"),
     HISTORY("History", Icons.Default.History, "tab_history"),
     SETTINGS("Settings", Icons.Default.Settings, "tab_settings")
@@ -76,7 +80,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val db = AppDatabase.getDatabase(applicationContext)
-        val repository = GestureRepository(db.gestureMappingDao(), db.gestureLogDao())
+        val repository = GestureRepository(
+            db.gestureMappingDao(),
+            db.gestureLogDao(),
+            db.gestureTrainingDao()
+        )
         val factory = GestureViewModelFactory(repository)
 
         setContent {
@@ -170,6 +178,9 @@ fun GestureFlowApp(viewModel: GestureViewModel) {
                     onRequestCameraPermission = {
                         permissionLauncher.launch(permissionsToRequest.toTypedArray())
                     }
+                )
+                AppTab.TRAIN -> TrainingScreen(
+                    viewModel = viewModel
                 )
                 AppTab.ACTIONS -> MappingsScreen(
                     viewModel = viewModel

@@ -116,14 +116,18 @@ fun MappingsScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        val trainedGestureIds by viewModel.trainedGestureIds.collectAsState()
+
         // Gestures List
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(mappings, key = { it.gestureId }) { mapping ->
+                val isTrained = trainedGestureIds.contains(mapping.gestureId)
                 GestureMappingCard(
                     mapping = mapping,
+                    isTrained = isTrained,
                     onToggleEnabled = { isChecked ->
                         viewModel.toggleMapping(mapping.gestureId, isChecked)
                     },
@@ -168,6 +172,7 @@ fun MappingsScreen(
 @Composable
 fun GestureMappingCard(
     mapping: GestureMapping,
+    isTrained: Boolean = false,
     onToggleEnabled: (Boolean) -> Unit,
     onCustomize: () -> Unit,
     onTestTrigger: () -> Unit
@@ -185,7 +190,7 @@ fun GestureMappingCard(
         ),
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
-            if (mapping.isEnabled) CyanPrimary.copy(alpha = 0.3f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+            if (isTrained) EmeraldAccent.copy(alpha = 0.5f) else if (mapping.isEnabled) CyanPrimary.copy(alpha = 0.3f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
         )
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -203,23 +208,40 @@ fun GestureMappingCard(
                         modifier = Modifier
                             .size(44.dp)
                             .clip(CircleShape)
-                            .background(CyanPrimary.copy(alpha = 0.18f)),
+                            .background(if (isTrained) EmeraldAccent.copy(alpha = 0.2f) else CyanPrimary.copy(alpha = 0.18f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = gesture.getIcon(),
                             contentDescription = gesture.title,
-                            tint = CyanPrimary,
+                            tint = if (isTrained) EmeraldAccent else CyanPrimary,
                             modifier = Modifier.size(24.dp)
                         )
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
-                        Text(
-                            text = gesture.title,
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = gesture.title,
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (isTrained) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = EmeraldAccent.copy(alpha = 0.2f)
+                                ) {
+                                    Text(
+                                        text = "TRAINED",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = EmeraldAccent,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
                         Text(
                             text = gesture.description,
                             style = MaterialTheme.typography.bodySmall,

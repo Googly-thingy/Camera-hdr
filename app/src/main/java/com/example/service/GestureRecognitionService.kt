@@ -98,7 +98,7 @@ class GestureRecognitionService : LifecycleService() {
         cameraExecutor = Executors.newSingleThreadExecutor()
 
         val db = AppDatabase.getDatabase(applicationContext)
-        repository = GestureRepository(db.gestureMappingDao(), db.gestureLogDao())
+        repository = GestureRepository(db.gestureMappingDao(), db.gestureLogDao(), db.gestureTrainingDao())
 
         createNotificationChannel()
 
@@ -106,6 +106,15 @@ class GestureRecognitionService : LifecycleService() {
         lifecycleScope.launch(Dispatchers.IO) {
             repository.enabledMappings.collect { list ->
                 activeMappings = list.associateBy { it.gestureId }
+            }
+        }
+
+        // Keep trained gesture profiles synchronized from Room
+        lifecycleScope.launch(Dispatchers.IO) {
+            repository.allTrainingSamples.collect {
+                val profiles = repository.loadTrainedProfiles()
+                detector.trainedProfiles = profiles
+                detector.requireTrainedOnly = profiles.isNotEmpty()
             }
         }
     }

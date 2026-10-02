@@ -446,14 +446,41 @@ fun ScannerScreen(
                                 }
                             }
 
-                            // Confidence badge
-                            Text(
-                                text = "${((currentDetection?.confidence ?: 0.9f) * 100).toInt()}% conf",
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                color = Color.LightGray
-                            )
+                            // Confidence & Trained match badge
+                            Column(horizontalAlignment = Alignment.End) {
+                                if (currentDetection?.isTrainedMatch == true) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = EmeraldAccent.copy(alpha = 0.25f)
+                                    ) {
+                                        Text(
+                                            text = "TRAINED ${(currentDetection?.matchScore?.times(100))?.toInt()}%",
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = EmeraldAccent,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                } else {
+                                    Text(
+                                        text = "${((currentDetection?.confidence ?: 0.9f) * 100).toInt()}% conf",
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        color = Color.LightGray
+                                    )
+                                }
+                            }
                         }
+                    } else if (currentDetection?.handDetected == true) {
+                        val score = ((currentDetection?.matchScore ?: 0f) * 100).toInt()
+                        Text(
+                            text = if (score > 0) "Hand visible • $score% match (Needs higher match to fire)" else "Hand visible • Pose matching in progress",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontSize = 12.sp,
+                            color = Color.Yellow,
+                            modifier = Modifier.align(Alignment.Center)
+                        )
                     } else {
                         Text(
                             text = "Show hand gesture to front camera to trigger shortcut",
