@@ -1,0 +1,6 @@
+{
+  "name": "GestureFlow",
+  "description": "Real-time front camera hand gesture recognition to trigger customizable system shortcuts and app launches in foreground and background.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
